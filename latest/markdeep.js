@@ -2036,21 +2036,33 @@ function replaceLists(s, protect) {
     var blankLineRegex = /^\s*$/;
     var colonEndRegex = /[:,]\s*$/;
     
+    // Track whether we're inside a list block (includes continuation lines)
+    var inListBlock = false;
+    
     for (var i = 0; i < lines.length; ++i) {
         var line = lines[i];
         var nextLine = i + 1 < lines.length ? lines[i + 1] : '';
-        var prevLine = i > 0 ? lines[i - 1] : '';
         
         // Check if current line starts with a list marker
         var currentIsListItem = listItemRegex.test(line);
         // Check if next line starts with a list marker (accounting for indentation)
         var nextIsListItem = listItemRegex.test(nextLine);
-        // Check if previous line was a list item
-        var prevIsListItem = i > 0 && listItemRegex.test(prevLine);
+        var currentIsBlank = blankLineRegex.test(line);
+        var currentIsIndented = /^[ \t]+/.test(line);
         
-        // If we're transitioning FROM a non-list line TO two consecutive list items,
+        // Update list block tracking
+        if (currentIsListItem) {
+            inListBlock = true;
+        } else if (currentIsBlank && ! nextIsListItem) {
+            // Blank line followed by non-list ends the block
+            inListBlock = false;
+        }
+        // Note: indented continuation lines keep inListBlock = true
+        
+        // If we're NOT in a list block and transitioning TO two consecutive list items,
         // insert our special marker before the first list item
-        if (! prevIsListItem && currentIsListItem && nextIsListItem && i > 0) {
+        if (! inListBlock && currentIsListItem && nextIsListItem && i > 0) {
+            var prevLine = lines[i - 1];
             var prevIsBlank = blankLineRegex.test(prevLine);
             var prevEndsWithColon = colonEndRegex.test(prevLine);
             
@@ -2066,7 +2078,7 @@ function replaceLists(s, protect) {
     
     var LIST_BLOCK_REGEXP = 
         new RegExp('(' + PREFIX + '|' + BLANK_LINES + '|<p>\s*\n|<br/>\s*\n?|\\n\u2029LISTSTART\u2029\\n)' +
-                    /((?:[ \t]*(?:\d+\.|-|\+|\*|\u2611|\u2610)(?:[ \t]+.+\n(?:[ \t]*\n)?)+)+)/.source, 'gm');
+                    /((?:[ \t]*(?:\d+\.|-|\+|\*|\u2611|\u2610)(?:[ \t]+.+\n(?:(?![ \t]*(?:\d+\.|-|\+|\*|\u2611|\u2610))[ \t]*\n)?)+)+)/.source, 'gm');
 
     var keepGoing = true;
 
@@ -2111,7 +2123,7 @@ function replaceLists(s, protect) {
                     // Went below top-level indent
                     result += '\n' + line;
                 } else if (! isOrdered && ! isUnordered && (isBlank || (indentLevel >= current.indentLevel))) {
-                    // Line without a marker
+                    // Line without a marker (blank or continuation)
                     result += '\n' + current.indentChars + line;
                 } else {
                     //console.log(indentLevel + ":" + line);
@@ -3290,7 +3302,7 @@ function markdeepToHTML(str, elementMode) {
                 shouldMark = true;
             }
             // Skip lines that are special markdown structures
-            else if (line.match(/^[ \t]*[~`]{3,}/) ||              // Fences (shouldn't hit this, but defensive)
+            if (line.match(/^[ \t]*[~`]{3,}/) ||              // Fences (shouldn't hit this, but defensive)
                      line.match(/^[ \t]*=+[ \t]*$/) ||             // Setext underlines (=)
                      line.match(/^[ \t]*[-*_]{3,}[ \t]*$/) ||      // Horizontal rules or Setext underlines (-)
                      line.indexOf('*****') >= 0 ||                 // Diagram boundaries (inline or standalone)
@@ -3302,7 +3314,7 @@ function markdeepToHTML(str, elementMode) {
                      line.match(/^[ \t]*[-+*][ \t]/) ||            // Bullet lists
                      line.match(/^[ \t]*\[[^\]]+\]:[ \t]+\S/) ||   // Reference definitions
                      line.match(/^[ \t]*!!!/) ||                   // Admonitions
-                     line.match(/^[ \t]*!\[/) ||                   // Images
+                     line.match(/^[ \t]*(?:!\[[^\]]*\]\([^)]*\)[ \t]*)+[ \t]*$/) ||  // Image grid lines (one or more images, nothing else)
                      line.match(/\b(figure|fig\.|table|tbl\.|listing|lst\.|diagram|section|subsection|chapter|sec\.)\s+\[/i)) {  // Keyword [ref] patterns
                 // Skip these
             }
@@ -3320,47 +3332,16 @@ function markdeepToHTML(str, elementMode) {
             // ----------------------------------------------------------------
             
             if (shouldMark) {
-                // Inject protected marker after the first token and its trailing whitespace
-                // This preserves critical patterns like '# Header' where space after # is required
+                // Inject protected marker at end of line
+                // This avoids breaking mid-line syntax patterns (checkboxes, dates, etc.)
                 var firstNonWhitespace = line.search(/\S/);
                 if (firstNonWhitespace >= 0) {
                     // Calculate 1-based line number (subtract 1 because we added '\n\n' prefix)
                     var lineNum = i - 1;
                     if (lineNum < 1) { lineNum = 1; }
                     
-                    var insertPos = -1;
-                    
-                    // If line starts with '<', it might be an HTML tag - inject after the closing '>'
-                    if (line.trim()[0] === '<') {
-                        var closingBracket = line.indexOf('>');
-                        if (closingBracket >= 0) {
-                            // Inject right after the '>'
-                            insertPos = closingBracket + 1;
-                        }
-                        // If no closing '>', skip this line (malformed or incomplete tag)
-                    } else {
-                        // Normal case: find end of first whitespace sequence after first token
-                        var afterFirstToken = line.substring(firstNonWhitespace).search(/\s/);
-                        if (afterFirstToken >= 0) {
-                            afterFirstToken += firstNonWhitespace;
-                            // Now find end of the whitespace sequence
-                            var afterWhitespace = line.substring(afterFirstToken).search(/\S/);
-                            if (afterWhitespace >= 0) {
-                                insertPos = afterWhitespace + afterFirstToken;
-                            } else {
-                                // Rest of line is whitespace, append at end
-                                insertPos = line.length;
-                            }
-                        } else {
-                            // No whitespace after first token, append at end
-                            insertPos = line.length;
-                        }
-                    }
-                    
-                    if (insertPos >= 0) {
-                        lines[i] = line.substring(0, insertPos) + protect('⟨L:' + lineNum + '⟩') + line.substring(insertPos);
-                        markerCount++;
-                    }
+                    lines[i] = line + protect('⟨L:' + lineNum + '⟩');
+                    markerCount++;
                 }
             }
         }
@@ -3413,6 +3394,11 @@ function markdeepToHTML(str, elementMode) {
 
     // Helper function to detect if content looks like an ASCII diagram
     function looksLikeDiagram(content) {
+        // If content contains HTML tags, it's not a diagram
+        if (content.match(/<[a-zA-Z][^>]*>/)) {
+            return false;
+        }
+        
         var lines = content.split('\n');
         if (lines.length < 3) return false;
         
@@ -3467,7 +3453,7 @@ function markdeepToHTML(str, elementMode) {
     // languages (or captions) are protected and won't be matched by diagram patterns
     // Capture exact fence chars and use backreference so nested fences with fewer chars aren't matched
     var stylizeFence = function (cssClass, symbol) {
-        var pattern = new RegExp('\n([ \\t]*)(' + symbol + '{3,})([ \\t]*\\S+)([ \\t]+.+)?\n([\\s\\S]+?)\n\\1\\2[ \t]*\n([ \\t]*\\[.+(?:\n.+){0,3}\\])?', 'g');
+        var pattern = new RegExp('\n([ \\t]*)(' + symbol + '{3,})([ \\t]*[^~`\\s]\\S*)([ \\t]+.+)?\n([\\s\\S]+?)\n\\1\\2[ \t]*\n([ \\t]*\\[.+(?:\n.+){0,3}\\])?', 'g');
         
         str = str.rp(pattern, function(match, indent, fence, lang, cssSubClass, sourceCode, caption) {
             lang = lang ? lang.trim() : undefined;
@@ -3792,19 +3778,23 @@ function markdeepToHTML(str, elementMode) {
     // If note that '#' in the title are only stripped if they appear at the end, in
     // order to allow headers with # in the title.
 
+    // Pattern to match optional protected line number markers (e.g., \ue010XXXX\ue010)
+    var OPTIONAL_LINE_NUM = '(?:\ue010[0-9a-w]{4}\ue010)?';
+    
     for (var i = 6; i > 0; --i) {
         var inLevel = inputLevel(i);
-        str = str.rp(new RegExp(/^\s*/.source + '#{' + i + ',' + i +'}(?:[ \t])([^\n]+?)#*[ \t]*\n', 'gm'), 
+        // Allow optional line number marker after closing # and before newline
+        str = str.rp(new RegExp(/^\s*/.source + '#{' + i + ',' + i +'}(?:[ \t])([^\n]+?)#*[ \t]*' + OPTIONAL_LINE_NUM + '\n', 'gm'), 
                  makeHeaderFunc(inLevel));
 
         // No-number headers: also need to translate output level
         var outLevel = outputLevel(inLevel);
         if (outLevel === 0) {
             // Special case: nonumber title
-            str = str.rp(new RegExp(/^\s*/.source + '\\(#{' + i + ',' + i +'}\\)(?:[ \t])([^\n]+?)\\(?#*\\)?\\n[ \t]*\n', 'gm'), 
+            str = str.rp(new RegExp(/^\s*/.source + '\\(#{' + i + ',' + i +'}\\)(?:[ \t])([^\n]+?)\\(?#*\\)?' + OPTIONAL_LINE_NUM + '\\n[ \t]*\n', 'gm'), 
                          '\n</p>\n' + entag('div', '$1', protect('class="title"')) + '\n<p>\n\n');
         } else {
-            str = str.rp(new RegExp(/^\s*/.source + '\\(#{' + i + ',' + i +'}\\)(?:[ \t])([^\n]+?)\\(?#*\\)?\\n[ \t]*\n', 'gm'), 
+            str = str.rp(new RegExp(/^\s*/.source + '\\(#{' + i + ',' + i +'}\\)(?:[ \t])([^\n]+?)\\(?#*\\)?' + OPTIONAL_LINE_NUM + '\\n[ \t]*\n', 'gm'), 
                          '\n</p>\n' + entag('div', '$1', protect('class="nonumberh' + outLevel + '"')) + '\n<p>\n\n');
         }
     }
@@ -4055,11 +4045,8 @@ function markdeepToHTML(str, elementMode) {
     // Temporarily protect image captions (or things that look like
     // them) because the following code is really slow at parsing
     // captions since they have regexps that are complicated to
-    // evaluate due to branching.
-    //
-    // The regexp is really just /.*?\n{0,5}.*/, but that executes substantially more slowly on Chrome.
-    // Caption pattern (?:[^\n\]\\]|\\[\[\]]).*? starts with either unescaped char or \[, \]
-    str = str.rp(/!\[((?:[^\n\]\\]|\\[\[\]]).*?\n?.*?\n?.*?\n?.*?\n?.*?)\]([\[\(])/g, function (match, caption, bracket) {
+    // write. It is also needed to protect captions that contain raw HTML.
+    str = str.rp(/!\[((?:[^\n\]\\\]|\\[\[\]]).*?\n?.*?\n?.*?\n?.*?\n?.*?)\]([[\(])/g, function (match, caption, bracket) {
         // Note: caption will be un-escaped later when processed by the image regex
         return '![' + protect(caption) + ']' + bracket;
     });
@@ -4088,8 +4075,10 @@ function markdeepToHTML(str, elementMode) {
     // Original: ((?:\n(?:...)+){2,}|...) - nested + inside {2,} causes exponential backtracking
     // Solution: Match a simpler pattern - lines that contain ONLY images
     // Then group consecutive lines in code to avoid nested quantifiers entirely
-    // Match: newline + one or more images + optional whitespace + newline
-    var imageLineRegex = /\n((?:[ \t]*!\[[^\]]{0,100}\]\([^<>\s\)]+(?:[^\n\)]{0,200})?\))+[ \t]*)\n/g;
+    // Match: newline + one or more images + optional whitespace + optional line number marker + lookahead for newline
+    // Line number markers look like: \ue010XXXX\ue010 (4 base-32 chars)
+    // Use lookahead (?=\n) instead of consuming \n so consecutive lines can match
+    var imageLineRegex = /\n((?:[ \t]*!\[[^\]]{0,100}\]\([^<>\s\)]+(?:[^\n\)]{0,200})?\))+[ \t]*(?:\ue010[0-9a-w]{4}\ue010)?)(?=\n)/g;
     
     // First pass: find all image lines and their positions
     var imageLines = [];
